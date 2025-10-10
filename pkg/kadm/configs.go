@@ -2,6 +2,7 @@ package kadm
 
 import (
 	"context"
+	"sort"
 	"strconv"
 
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -414,4 +415,95 @@ func (cl *Client) alterConfigsState(
 		}
 		return nil
 	})
+}
+
+//////////////////////
+// CONFIG RESOURCES //
+//////////////////////
+
+type ConfigResourceType = kmsg.ConfigResourceType
+
+const (
+	ConfigResourceUnknown       ConfigResourceType = kmsg.ConfigResourceTypeUnknown
+	ConfigResourceTopic         ConfigResourceType = kmsg.ConfigResourceTypeTopic
+	ConfigResourceBroker        ConfigResourceType = kmsg.ConfigResourceTypeBroker
+	ConfigResourceBrokerLogger  ConfigResourceType = kmsg.ConfigResourceTypeBrokerLogger
+	ConfigResourceClientMetrics ConfigResourceType = kmsg.ConfigResourceTypeBrokerLogger
+)
+
+// ConfigResource represents a single config resource.
+type ConfigResource struct {
+	Name string // Name is the resource name.
+	Type int8   // Type is the resource type.
+}
+
+// ListedConfigResources contains the results of listing config resources.
+type ListedConfigResources struct {
+	Resources []ConfigResource // Resources contains all listed config resources.
+	Err       error            // Err is non-nil if the request failed.
+}
+
+// Sorted returns all resources sorted by type, then by name.
+func (l ListedConfigResources) Sorted() []ConfigResource {
+	s := make([]ConfigResource, len(l.Resources))
+	copy(s, l.Resources)
+	sort.Slice(s, func(i, j int) bool {
+		return s[i].Type < s[j].Type ||
+			s[i].Type == s[j].Type && s[i].Name < s[j].Name
+	})
+	return s
+}
+
+// ByType returns all resources of the given type.
+func (l ListedConfigResources) ByType(resourceType int8) []ConfigResource {
+	var filtered []ConfigResource
+	for _, r := range l.Resources {
+		if r.Type == resourceType {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
+}
+
+// Names returns all resource names in sorted order.
+func (l ListedConfigResources) Names() []string {
+	names := make([]string, 0, len(l.Resources))
+	for _, r := range l.Resources {
+		names = append(names, r.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ListConfigResources lists config resources (KIP-1000, Kafka 3.7+, renamed in KIP-1142).
+// This was previously called ListClientMetricsResources before Kafka 4.1.
+//
+// If no resource types are specified, Kafka uses its default supported config resource types.
+//
+// This may return *AuthError.
+func (cl *Client) ListConfigResources(ctx context.Context, resourceTypes ...int8) (ListedConfigResources, error) {
+	req := kmsg.NewPtrListConfigResourcesRequest()
+	req.ResourceTypes = resourceTypes
+
+	resp, err := req.RequestWith(ctx, cl.cl)
+	if err != nil {
+		return ListedConfigResources{}, err
+	}
+
+	if err := maybeAuthErr(resp.ErrorCode); err != nil {
+		return ListedConfigResources{}, err
+	}
+
+	result := ListedConfigResources{
+		Err: kerr.ErrorForCode(resp.ErrorCode),
+	}
+
+	for _, r := range resp.ConfigResources {
+		result.Resources = append(result.Resources, ConfigResource{
+			Name: r.Name,
+			Type: r.Type,
+		})
+	}
+
+	return result, nil
 }
